@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Attendance</title>
+</head>
+
+<body>
+
+<h2>Face Attendance</h2>
+
+<video
+    id="video"
+    width="320"
+    height="240"
+    autoplay
+    playsinline
+    muted
+    style="border:2px solid black;">
+</video>
+
+<br><br>
+
+<button onclick="startCamera()">
+Start Camera
+</button>
+
+<button onclick="capture()">
+Mark Attendance
+</button>
+
+<canvas
+    id="canvas"
+    width="320"
+    height="240"
+    style="display:none;">
+</canvas>
+
+<script>
+
+let video =
+document.getElementById("video");
+
+async function startCamera(){
+
+    try{
+
+        const stream =
+        await navigator.mediaDevices.getUserMedia({
+            video:{
+                facingMode:"user"
+            }
+        });
+
+        video.srcObject = stream;
+
+    }
+    catch(error){
+
+        alert(
+            "Camera Error: " +
+            error.message
+        );
+
+        console.log(error);
+    }
+}
+
+function capture(){
+
+    let canvas =
+    document.getElementById("canvas");
+
+    let context =
+    canvas.getContext("2d");
+
+    context.drawImage(
+        video,
+        0,
+        0,
+        320,
+        240
+    );
+
+    let image =
+    canvas.toDataURL(
+        "image/jpeg"
+    );
+
+    fetch(
+        "/verify_face",
+        {
+            method:"POST",
+            headers:{
+                "Content-Type":
+                "application/json"
+            },
+            body:JSON.stringify({
+                image:image
+            })
+        }
+    )
+    .then(response => response.text())
+    .then(data => alert(data))
+    .catch(error => alert(error));
+}
+
+</script>
+
+</body>
+</html>

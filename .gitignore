@@ -1,0 +1,25 @@
+# Virtual Environment
+venv311/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# PyCharm
+.idea/
+
+# Temporary uploads
+uploads/
+
+# Generated QR
+static/qr/current_qr.png
+
+# Generated reports
+attendance_report.pdf
+
+# Environment variables
+.env
