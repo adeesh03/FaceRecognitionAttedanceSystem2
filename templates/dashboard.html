@@ -1,157 +1,20 @@
-<!DOCTYPE html>
-<html>
-<head>
-
-<title>Dashboard</title>
-
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-
-<style>
-
-body{
-    background:#f5f6fa;
-}
-
-.sidebar{
-    width:250px;
-    height:100vh;
-    position:fixed;
-    background:#212529;
-    color:white;
-    padding-top:20px;
-}
-
-.sidebar a{
-    display:block;
-    color:white;
-    text-decoration:none;
-    padding:15px;
-}
-
-.sidebar a:hover{
-    background:#343a40;
-}
-
-.content{
-    margin-left:270px;
-    padding:30px;
-}
-
-.card{
-    border:none;
-    border-radius:15px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="sidebar">
-
-<h3 class="text-center">
-Attendance System
-</h3>
-
-<hr>
-
-<a href="/dashboard">🏠 Dashboard</a>
-
-<a href="/students">👨‍🎓 Students</a>
-
-<a href="/attendance">📋 Attendance</a>
-
-<a href="/search_attendance">🔍 Search</a>
-
-<a href="/attendance_percentage">📊 Percentage</a>
-
-<a href="/analytics">📈 Analytics</a>
-
-<a href="/logout">🚪 Logout</a>
-    <a href="/generate_pin"
-class="btn btn-danger">
-Generate Attendance PIN
-</a>
-    <h3>Attendance QR</h3>
-
-<h3>Current Attendance QR</h3>
-
-<img
-src="{{ url_for('static', filename='qr/current_qr.png') }}"
-width="250">
-
-<br><br>
-
-<a
-href="/generate_pin"
-class="btn btn-danger">
-Generate New Session
-</a>
-
-
-
+{% extends "base.html" %}
+{% block title %}Overview · {{ config.INSTITUTION_NAME }}{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-4">
+  <div><p class="page-eyebrow mb-2">{{ config.INSTITUTION_NAME }}</p><h1 class="page-title mb-1">Attendance overview</h1><p class="text-muted mb-0">Monitor student participation and manage secure check-in sessions.</p></div>
+  <a class="btn btn-outline-primary" href="{{ url_for('register') }}">Add student</a>
 </div>
-
-<div class="content">
-
-<h2 class="mb-4">
-Face Recognition Attendance Dashboard
-</h2>
-
-<div class="row">
-
-<div class="col-md-4">
-
-<div class="card bg-primary text-white">
-
-<div class="card-body">
-
-<h5>Total Students</h5>
-
-<h1>{{ total_students }}</h1>
-
+<div class="row g-3 mb-4">
+  {% for label, value, icon in [('Registered students', total_students, 'ST'), ('Attendance records', total_attendance, 'AR'), ('Present today', present_today, 'PT')] %}
+  <div class="col-md-4"><div class="panel metric d-flex justify-content-between"><div><div class="metric-label">{{ label }}</div><div class="metric-value">{{ value }}</div></div><div class="metric-icon">{{ icon }}</div></div></div>
+  {% endfor %}
 </div>
-
+<div class="row g-4">
+  <div class="col-lg-7"><section class="panel p-4 h-100"><p class="page-eyebrow mb-2">Quick actions</p><h2 class="h4">Manage attendance</h2><p class="text-muted mb-4">Review records, locate a student, or inspect attendance performance.</p><div class="d-flex flex-wrap gap-2"><a class="btn btn-primary" href="{{ url_for('attendance') }}">View records</a><a class="btn btn-outline-secondary" href="{{ url_for('search_attendance') }}">Search</a><a class="btn btn-outline-secondary" href="{{ url_for('attendance_percentage') }}">Percentages</a><a class="btn btn-outline-secondary" href="{{ url_for('analytics') }}">Analytics</a></div></section></div>
+  <div class="col-lg-5"><section class="panel p-4 text-center h-100"><p class="page-eyebrow mb-2">Live check-in</p><h2 class="h4">Attendance session</h2>
+    {% if active_session and qr_exists %}<img class="img-fluid rounded-3 my-3" width="190" src="{{ url_for('static', filename='qr/current_qr.png') }}?v={{ active_session[0] }}" alt="Current attendance QR code"><p class="mb-1">PIN <strong class="font-monospace fs-4">{{ active_session[1] }}</strong></p><p class="text-muted small">Expires {{ active_session[2].strftime('%H:%M') }}</p>{% else %}<div class="empty-state py-4">No attendance session is currently active.</div>{% endif %}
+    <form action="{{ url_for('generate_pin') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-primary w-100" type="submit">{{ 'Replace active session' if active_session else 'Start attendance session' }}</button></form>
+  </section></div>
 </div>
-
-</div>
-
-<div class="col-md-4">
-
-<div class="card bg-success text-white">
-
-<div class="card-body">
-
-<h5>Total Attendance</h5>
-
-<h1>{{ total_attendance }}</h1>
-
-</div>
-
-</div>
-
-</div>
-
-<div class="col-md-4">
-
-<div class="card bg-warning">
-
-<div class="card-body">
-
-<h5>Present Today</h5>
-
-<h1>{{ present_today }}</h1>
-
-</div>
-
-</div>
-
-</div>
-
-</div>
-
-</div>
-
-</body>
-</html>
+{% endblock %}

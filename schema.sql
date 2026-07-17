@@ -1,0 +1,43 @@
+CREATE DATABASE IF NOT EXISTS attendance_system
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE attendance_system;
+
+CREATE TABLE IF NOT EXISTS students (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  student_id VARCHAR(40) NOT NULL,
+  name VARCHAR(120) NOT NULL,
+  department VARCHAR(100) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_students_student_id (student_id),
+  UNIQUE KEY uq_students_email (email)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS attendance_session (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  pin CHAR(6) NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  expires_at DATETIME NOT NULL,
+  session_name VARCHAR(160) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY ix_attendance_session_active_expiry (is_active, expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS attendance (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  student_id VARCHAR(40) NOT NULL,
+  session_id BIGINT UNSIGNED NOT NULL,
+  attendance_date DATE NOT NULL,
+  attendance_time TIME NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'Present',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_attendance_student_session (student_id, session_id),
+  KEY ix_attendance_date (attendance_date),
+  CONSTRAINT fk_attendance_student FOREIGN KEY (student_id)
+    REFERENCES students (student_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+  CONSTRAINT fk_attendance_session FOREIGN KEY (session_id)
+    REFERENCES attendance_session (id) ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
