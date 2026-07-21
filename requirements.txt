@@ -7,4 +7,5 @@ pandas==3.0.3
 Pillow==12.2.0
 qrcode==8.2
 python-dotenv==1.1.1
+setuptools<81
 reportlab>=4.0,<5.0

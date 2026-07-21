@@ -12,7 +12,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
-  {% if session.get('admin') %}
+  {% if session.get('role') %}
   <nav class="navbar navbar-expand-lg navbar-dark app-nav">
     <div class="container-xl">
       <a class="navbar-brand fw-bold d-flex align-items-center" href="{{ url_for('dashboard') }}"><span class="brand-mark">JU</span><span><span class="d-block brand-name">{{ config.INSTITUTION_NAME }}</span><small class="d-block brand-subtitle">{{ config.APPLICATION_NAME }}</small></span></a>
@@ -20,9 +20,13 @@
       <div class="collapse navbar-collapse" id="appNav">
         <div class="navbar-nav ms-auto align-items-lg-center gap-lg-1">
           <a class="nav-link" href="{{ url_for('dashboard') }}">Overview</a>
-          <a class="nav-link" href="{{ url_for('students') }}">Students</a>
+          {% if session.get('role') == 'admin' %}<a class="nav-link" href="{{ url_for('students') }}">Students</a><a class="nav-link" href="{{ url_for('lecturers') }}">Lecturers</a>{% endif %}
+          <a class="nav-link" href="{{ url_for('courses') }}">Courses</a>
           <a class="nav-link" href="{{ url_for('attendance') }}">Attendance</a>
-          <a class="nav-link" href="{{ url_for('analytics') }}">Analytics</a>
+          <a class="nav-link" href="{{ url_for('attendance_percentage') }}">Percentages</a>
+          <a class="nav-link" href="{{ url_for('reports') }}">Reports</a>
+          {% if session.get('role') == 'admin' %}<a class="nav-link" href="{{ url_for('audit_logs') }}">Audit</a>{% endif %}
+          <span class="navbar-text small ms-lg-2">{{ session.get('display_name') }}</span>
           <form action="{{ url_for('logout') }}" method="post" class="ms-lg-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-sm btn-outline-light" type="submit">Sign out</button>

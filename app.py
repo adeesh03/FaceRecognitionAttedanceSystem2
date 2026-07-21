@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import base64
+import csv
+import json
 import os
 import pickle
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import wraps
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import qrcode
@@ -23,19 +25,20 @@ from flask import (
     redirect,
     render_template,
     request,
+    Response,
     session,
     url_for,
 )
 from mysql.connector import Error, IntegrityError
 from werkzeug.exceptions import RequestEntityTooLarge
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from database import get_connection
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 ENCODINGS_FILE = BASE_DIR / "encodings" / "encodings.pkl"
-QR_FILE = BASE_DIR / "static" / "qr" / "current_qr.png"
+QR_DIR = BASE_DIR / "static" / "qr"
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -70,15 +73,49 @@ def database_cursor(dictionary: bool = False):
         connection.close()
 
 
-def admin_required(view):
+def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("admin"):
+        if session.get("role") not in {"admin", "lecturer"}:
             flash("Please sign in to continue.", "warning")
             return redirect(url_for("login", next=request.path))
         return view(*args, **kwargs)
 
     return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("role"):
+            flash("Please sign in to continue.", "warning")
+            return redirect(url_for("login", next=request.path))
+        if session.get("role") != "admin":
+            abort(403, description="Administrator access is required.")
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def staff_required(view):
+    return login_required(view)
+
+
+def _course_scope(alias: str = "c") -> tuple[str, tuple]:
+    if session.get("role") == "lecturer":
+        return f" AND {alias}.lecturer_id=%s", (session.get("user_id"),)
+    return "", ()
+
+
+def _audit(cursor, action: str, entity_type: str, entity_id=None, details=None) -> None:
+    cursor.execute(
+        """INSERT INTO audit_logs
+           (actor_type, actor_id, action, entity_type, entity_id, details, ip_address)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (session.get("role", "public"), str(session.get("user_id") or session.get("display_name") or "anonymous"),
+         action, entity_type, str(entity_id) if entity_id is not None else None,
+         json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details,
+         request.headers.get("X-Forwarded-For", request.remote_addr)),
+    )
 
 
 def _csrf_token() -> str:
@@ -107,6 +144,7 @@ def _public_base_url() -> str:
 def register_routes(app: Flask) -> None:
     app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.globals["current_year"] = datetime.now().year
+    app.jinja_env.globals["now"] = datetime.now()
 
     @app.before_request
     def protect_post_requests():
@@ -115,11 +153,11 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/")
     def home():
-        return redirect(url_for("dashboard" if session.get("admin") else "login"))
+        return redirect(url_for("dashboard" if session.get("role") else "login"))
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
-        if session.get("admin"):
+        if session.get("role"):
             return redirect(url_for("dashboard"))
         if request.method == "POST":
             username = request.form.get("username", "").strip()
@@ -127,58 +165,63 @@ def register_routes(app: Flask) -> None:
             configured_username = os.environ.get("ADMIN_USERNAME")
             password_hash = os.environ.get("ADMIN_PASSWORD_HASH")
             plain_password = os.environ.get("ADMIN_PASSWORD")
-            if not configured_username or not (password_hash or plain_password):
-                app.logger.error("ADMIN_USERNAME and an admin password are not configured")
-                abort(503, description="Administrator credentials are not configured.")
-            password_valid = (
-                check_password_hash(password_hash, password)
-                if password_hash
-                else secrets.compare_digest(password, plain_password)
-            )
-            if secrets.compare_digest(username, configured_username) and password_valid:
+            password_valid = False
+            if configured_username and (password_hash or plain_password):
+                password_valid = check_password_hash(password_hash, password) if password_hash else secrets.compare_digest(password, plain_password)
+            if configured_username and secrets.compare_digest(username, configured_username) and password_valid:
                 session.clear()
-                session["admin"] = True
+                session.update(role="admin", display_name="Administrator")
                 session.permanent = True
                 _csrf_token()
                 flash("Welcome back.", "success")
+                return redirect(url_for("dashboard"))
+            with database_cursor(dictionary=True) as (_, cursor):
+                cursor.execute("SELECT id, staff_id, name, password_hash FROM lecturers WHERE is_active=TRUE AND (staff_id=%s OR email=%s)", (username.upper(), username.lower()))
+                lecturer = cursor.fetchone()
+            if lecturer and check_password_hash(lecturer["password_hash"], password):
+                session.clear()
+                session.update(role="lecturer", user_id=lecturer["id"], display_name=lecturer["name"], staff_id=lecturer["staff_id"])
+                session.permanent = True
+                _csrf_token()
+                flash(f"Welcome, {lecturer['name']}.", "success")
                 return redirect(url_for("dashboard"))
             flash("The username or password is incorrect.", "danger")
         return render_template("login.html")
 
     @app.post("/logout")
-    @admin_required
+    @login_required
     def logout():
         session.clear()
         flash("You have been signed out.", "info")
         return redirect(url_for("login"))
 
     @app.get("/dashboard")
-    @admin_required
+    @login_required
     def dashboard():
+        scope, params = _course_scope()
         with database_cursor() as (_, cursor):
             cursor.execute("SELECT COUNT(*) FROM students")
             total_students = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM attendance")
+            cursor.execute("SELECT COUNT(*) FROM attendance a LEFT JOIN attendance_session ats ON ats.id=a.session_id LEFT JOIN courses c ON c.id=ats.course_id WHERE 1=1" + scope, params)
             total_attendance = cursor.fetchone()[0]
             cursor.execute(
-                "SELECT COUNT(DISTINCT student_id) FROM attendance WHERE attendance_date=CURDATE()"
+                "SELECT COUNT(DISTINCT a.student_id) FROM attendance a LEFT JOIN attendance_session ats ON ats.id=a.session_id LEFT JOIN courses c ON c.id=ats.course_id WHERE a.attendance_date=CURDATE()" + scope, params
             )
             present_today = cursor.fetchone()[0]
             cursor.execute(
-                """
-                SELECT id, pin, expires_at FROM attendance_session
-                WHERE is_active=TRUE AND expires_at > NOW()
-                ORDER BY id DESC LIMIT 1
-                """
+                """SELECT ats.id, ats.pin, ats.expires_at, c.course_code, c.course_name
+                   FROM attendance_session ats JOIN courses c ON c.id=ats.course_id
+                   WHERE ats.is_active=TRUE AND ats.expires_at>NOW()""" + scope + " ORDER BY ats.id DESC", params
             )
-            active_session = cursor.fetchone()
+            active_sessions = cursor.fetchall()
+            cursor.execute("SELECT c.id,c.course_code,c.course_name FROM courses c WHERE c.is_active=TRUE" + scope + " ORDER BY c.course_code", params)
+            courses = cursor.fetchall()
         return render_template(
             "dashboard.html",
             total_students=total_students,
             total_attendance=total_attendance,
             present_today=present_today,
-            active_session=active_session,
-            qr_exists=QR_FILE.exists(),
+            active_sessions=active_sessions, courses=courses,
         )
 
     @app.route("/register", methods=["GET", "POST"])
@@ -201,6 +244,7 @@ def register_routes(app: Flask) -> None:
                         """,
                         (student_id, name, department, email),
                     )
+                    _audit(cursor, "student.created", "student", student_id, {"name": name})
                     connection.commit()
             except IntegrityError:
                 flash("That student ID or email is already registered.", "danger")
@@ -220,17 +264,18 @@ def register_routes(app: Flask) -> None:
         return render_template("students.html", students=rows)
 
     @app.get("/attendance")
-    @admin_required
+    @staff_required
     def attendance():
+        scope, params = _course_scope()
         with database_cursor() as (_, cursor):
             cursor.execute(
                 """
                 SELECT a.id, a.student_id, a.attendance_date, a.attendance_time,
-                       a.status, a.session_id, s.session_name
+                       a.status, a.session_id, ats.session_name, c.course_code
                 FROM attendance a
-                LEFT JOIN attendance_session s ON s.id=a.session_id
-                ORDER BY a.attendance_date DESC, a.attendance_time DESC
-                """
+                LEFT JOIN attendance_session ats ON ats.id=a.session_id
+                LEFT JOIN courses c ON c.id=ats.course_id WHERE 1=1
+                """ + scope + " ORDER BY a.attendance_date DESC, a.attendance_time DESC", params
             )
             rows = cursor.fetchall()
         return render_template("attendance.html", attendance=rows)
@@ -260,51 +305,43 @@ def register_routes(app: Flask) -> None:
         )
 
     @app.get("/attendance_percentage")
-    @admin_required
+    @staff_required
     def attendance_percentage():
-        with database_cursor() as (_, cursor):
+        selected = request.args.get("course_id", type=int)
+        scope, params = _course_scope()
+        course_filter = " AND c.id=%s" if selected else ""
+        values = params + ((selected,) if selected else ())
+        with database_cursor(dictionary=True) as (_, cursor):
             cursor.execute(
-                """
-                SELECT COUNT(*) FROM attendance_session
-                WHERE is_active=FALSE OR expires_at <= NOW()
-                """
-            )
-            total_sessions = cursor.fetchone()[0]
-            cursor.execute(
-                """
-                SELECT s.student_id, s.name,
-                       COUNT(DISTINCT completed.id) AS attended_sessions
-                FROM students s
-                LEFT JOIN attendance a ON a.student_id=s.student_id
-                LEFT JOIN attendance_session completed
-                  ON completed.id=a.session_id
-                 AND (completed.is_active=FALSE OR completed.expires_at <= NOW())
-                GROUP BY s.student_id, s.name ORDER BY s.student_id
-                """
+                """SELECT c.course_code,c.course_name,s.student_id,s.name,
+                    COUNT(DISTINCT CASE WHEN ats.id IS NOT NULL AND (ats.is_active=FALSE OR ats.expires_at<=NOW()) THEN ats.id END) total_sessions,
+                    COUNT(DISTINCT CASE WHEN (ats.is_active=FALSE OR ats.expires_at<=NOW()) AND a.id IS NOT NULL THEN ats.id END) attended_sessions
+                    FROM course_enrollments e JOIN courses c ON c.id=e.course_id
+                    JOIN students s ON s.student_id=e.student_id
+                    LEFT JOIN attendance_session ats ON ats.course_id=c.id
+                    LEFT JOIN attendance a ON a.session_id=ats.id AND a.student_id=s.student_id
+                    WHERE 1=1""" + scope + course_filter +
+                " GROUP BY c.id,c.course_code,c.course_name,s.student_id,s.name ORDER BY c.course_code,s.student_id", values
             )
             rows = cursor.fetchall()
-        report = [
-            (
-                student_id,
-                name,
-                attended,
-                total_sessions,
-                round(attended / total_sessions * 100, 1) if total_sessions else 0,
-            )
-            for student_id, name, attended in rows
-        ]
-        return render_template("attendance_percentage.html", data=report)
+            cursor.execute("SELECT c.id,c.course_code,c.course_name FROM courses c WHERE c.is_active=TRUE" + scope + " ORDER BY c.course_code", params)
+            courses = cursor.fetchall()
+        for row in rows:
+            row["percentage"] = round(row["attended_sessions"] / row["total_sessions"] * 100, 1) if row["total_sessions"] else 0
+        return render_template("attendance_percentage.html", data=rows, courses=courses, selected=selected)
 
     @app.get("/analytics")
-    @admin_required
+    @staff_required
     def analytics():
+        scope, params = _course_scope()
         with database_cursor() as (_, cursor):
             cursor.execute(
                 """
-                SELECT s.student_id, COUNT(a.id)
-                FROM students s LEFT JOIN attendance a ON a.student_id=s.student_id
-                GROUP BY s.student_id ORDER BY s.student_id
-                """
+                SELECT st.student_id, COUNT(a.id) FROM students st
+                LEFT JOIN attendance a ON a.student_id=st.student_id
+                LEFT JOIN attendance_session ats ON ats.id=a.session_id
+                LEFT JOIN courses c ON c.id=ats.course_id WHERE 1=1
+                """ + scope + " GROUP BY st.student_id ORDER BY st.student_id", params
             )
             chart_data = cursor.fetchall()
         return render_template(
@@ -313,32 +350,163 @@ def register_routes(app: Flask) -> None:
             values=[row[1] for row in chart_data],
         )
 
-    @app.post("/generate_pin")
+    def _report_rows():
+        scope, params = _course_scope()
+        clauses=[]; values=list(params)
+        if request.args.get("course_id",type=int): clauses.append("c.id=%s"); values.append(request.args.get("course_id",type=int))
+        if request.args.get("student_id","").strip(): clauses.append("a.student_id=%s"); values.append(request.args["student_id"].strip().upper())
+        if request.args.get("start",""): clauses.append("a.attendance_date>=%s"); values.append(request.args["start"])
+        if request.args.get("end",""): clauses.append("a.attendance_date<=%s"); values.append(request.args["end"])
+        extra=(" AND "+" AND ".join(clauses)) if clauses else ""
+        with database_cursor(dictionary=True) as (_,cursor):
+            cursor.execute("""SELECT a.student_id,st.name,c.course_code,c.course_name,ats.session_name,
+                a.attendance_date,a.attendance_time,a.status FROM attendance a
+                JOIN students st ON st.student_id=a.student_id JOIN attendance_session ats ON ats.id=a.session_id
+                JOIN courses c ON c.id=ats.course_id WHERE 1=1"""+scope+extra+" ORDER BY a.attendance_date DESC,a.attendance_time DESC",tuple(values)); rows=cursor.fetchall()
+            cursor.execute("SELECT c.id,c.course_code,c.course_name FROM courses c WHERE 1=1"+scope+" ORDER BY c.course_code",params); course_rows=cursor.fetchall()
+        return rows,course_rows
+
+    @app.get("/reports")
+    @staff_required
+    def reports():
+        rows,course_rows=_report_rows()
+        return render_template("reports.html",attendance=rows,courses=course_rows)
+
+    @app.get("/reports/export.csv")
+    @staff_required
+    def report_export():
+        rows,_=_report_rows(); output=StringIO(); writer=csv.writer(output); writer.writerow(["Student ID","Student","Course","Subject","Session","Date","Time","Status"])
+        for r in rows: writer.writerow([r["student_id"],r["name"],r["course_code"],r["course_name"],r["session_name"],r["attendance_date"],r["attendance_time"],r["status"]])
+        with database_cursor() as (connection,cursor): _audit(cursor,"report.exported","attendance_report",details={"rows":len(rows)}); connection.commit()
+        return Response(output.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=attendance-report.csv"})
+
+    @app.get("/audit-logs")
     @admin_required
+    def audit_logs():
+        action=request.args.get("action","").strip(); values=(); where=""
+        if action: where=" WHERE action LIKE %s"; values=(f"%{action}%",)
+        with database_cursor(dictionary=True) as (_,cursor): cursor.execute("SELECT * FROM audit_logs"+where+" ORDER BY id DESC LIMIT 500",values); rows=cursor.fetchall()
+        return render_template("audit_logs.html",logs=rows,action=action)
+
+    @app.post("/generate_pin")
+    @staff_required
     def generate_pin():
+        course_id = request.form.get("course_id", type=int)
+        scope, params = _course_scope()
+        with database_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT c.id,c.course_code,c.course_name FROM courses c WHERE c.id=%s AND c.is_active=TRUE" + scope, (course_id,) + params)
+            course = cursor.fetchone()
+        if not course:
+            abort(403, description="Select a course assigned to your account.")
         pin = f"{secrets.randbelow(1_000_000):06d}"
         expiry = datetime.now() + timedelta(minutes=5)
         with database_cursor() as (connection, cursor):
-            cursor.execute("UPDATE attendance_session SET is_active=FALSE")
+            cursor.execute("UPDATE attendance_session SET is_active=FALSE WHERE course_id=%s", (course_id,))
             cursor.execute(
                 """
-                INSERT INTO attendance_session (pin, is_active, expires_at, session_name)
-                VALUES (%s, TRUE, %s, %s)
+                INSERT INTO attendance_session (pin, is_active, expires_at, session_name, course_id, created_by_lecturer_id)
+                VALUES (%s, TRUE, %s, %s, %s, %s)
                 """,
                 (
                     pin,
                     expiry,
-                    f"{app.config['INSTITUTION_NAME']} · {datetime.now():%d %b %Y, %H:%M}",
+                    f"{course['course_code']} · {datetime.now():%d %b %Y, %H:%M}", course_id,
+                    session.get("user_id") if session.get("role") == "lecturer" else None,
                 ),
             )
             session_id = cursor.lastrowid
+            _audit(cursor, "session.created", "attendance_session", session_id, {"course": course["course_code"]})
             connection.commit()
         base_url = _public_base_url()
         attendance_url = f"{base_url}{url_for('student_attendance', session_id=session_id)}"
-        QR_FILE.parent.mkdir(parents=True, exist_ok=True)
-        qrcode.make(attendance_url).save(QR_FILE)
+        QR_DIR.mkdir(parents=True, exist_ok=True)
+        qrcode.make(attendance_url).save(QR_DIR / f"session_{session_id}.png")
         flash("A new five-minute attendance session is active.", "success")
         return redirect(url_for("dashboard"))
+
+    @app.get("/lecturers")
+    @admin_required
+    def lecturers():
+        with database_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT l.*,COUNT(c.id) course_count FROM lecturers l LEFT JOIN courses c ON c.lecturer_id=l.id GROUP BY l.id ORDER BY l.name")
+            rows = cursor.fetchall()
+        return render_template("lecturers.html", lecturers=rows)
+
+    @app.route("/lecturers/new", methods=["GET", "POST"])
+    @admin_required
+    def lecturer_new():
+        if request.method == "POST":
+            staff_id=request.form.get("staff_id","").strip().upper(); name=request.form.get("name","").strip(); email=request.form.get("email","").strip().lower(); password=request.form.get("password","")
+            if not all((staff_id,name,email,password)) or len(password)<8:
+                flash("Complete every field and use a password of at least 8 characters.", "danger")
+            else:
+                try:
+                    with database_cursor() as (connection,cursor):
+                        cursor.execute("INSERT INTO lecturers(staff_id,name,email,password_hash) VALUES(%s,%s,%s,%s)",(staff_id,name,email,generate_password_hash(password)))
+                        _audit(cursor,"lecturer.created","lecturer",cursor.lastrowid,{"staff_id":staff_id}); connection.commit()
+                    flash("Lecturer account created.","success"); return redirect(url_for("lecturers"))
+                except IntegrityError: flash("That staff ID or email already exists.","danger")
+        return render_template("lecturer_form.html")
+
+    @app.post("/lecturers/<int:lecturer_id>/toggle")
+    @admin_required
+    def lecturer_toggle(lecturer_id):
+        with database_cursor() as (connection,cursor):
+            cursor.execute("UPDATE lecturers SET is_active=NOT is_active WHERE id=%s",(lecturer_id,)); _audit(cursor,"lecturer.toggled","lecturer",lecturer_id); connection.commit()
+        flash("Lecturer status updated.","success"); return redirect(url_for("lecturers"))
+
+    @app.get("/courses")
+    @staff_required
+    def courses():
+        scope,params=_course_scope()
+        with database_cursor(dictionary=True) as (_,cursor):
+            cursor.execute("SELECT c.*,l.name lecturer_name,COUNT(DISTINCT e.id) enrolled,COUNT(DISTINCT ats.id) sessions FROM courses c LEFT JOIN lecturers l ON l.id=c.lecturer_id LEFT JOIN course_enrollments e ON e.course_id=c.id LEFT JOIN attendance_session ats ON ats.course_id=c.id WHERE 1=1"+scope+" GROUP BY c.id ORDER BY c.course_code",params); rows=cursor.fetchall()
+        return render_template("courses.html",courses=rows)
+
+    @app.route("/courses/new", methods=["GET","POST"])
+    @admin_required
+    def course_new():
+        with database_cursor(dictionary=True) as (_,cursor): cursor.execute("SELECT id,staff_id,name FROM lecturers WHERE is_active=TRUE ORDER BY name"); lecturer_rows=cursor.fetchall()
+        if request.method=="POST":
+            code=request.form.get("course_code","").strip().upper(); name=request.form.get("course_name","").strip(); department=request.form.get("department","").strip(); semester=request.form.get("semester","").strip(); lecturer_id=request.form.get("lecturer_id",type=int)
+            if not all((code,name,department,semester)):
+                flash("All course fields are required.","danger")
+            else:
+                try:
+                    with database_cursor() as (connection,cursor):
+                        cursor.execute("INSERT INTO courses(course_code,course_name,department,semester,lecturer_id) VALUES(%s,%s,%s,%s,%s)",(code,name,department,semester,lecturer_id)); _audit(cursor,"course.created","course",cursor.lastrowid,{"code":code}); connection.commit()
+                    flash("Course created.","success"); return redirect(url_for("courses"))
+                except IntegrityError: flash("That course code already exists.","danger")
+        return render_template("course_form.html",lecturers=lecturer_rows)
+
+    @app.get("/courses/<int:course_id>")
+    @staff_required
+    def course_detail(course_id):
+        scope,params=_course_scope()
+        with database_cursor(dictionary=True) as (_,cursor):
+            cursor.execute("SELECT c.*,l.name lecturer_name FROM courses c LEFT JOIN lecturers l ON l.id=c.lecturer_id WHERE c.id=%s"+scope,(course_id,)+params); course=cursor.fetchone()
+            if not course: abort(404)
+            cursor.execute("SELECT e.student_id,s.name,s.department FROM course_enrollments e JOIN students s ON s.student_id=e.student_id WHERE e.course_id=%s ORDER BY s.student_id",(course_id,)); enrolled=cursor.fetchall()
+            cursor.execute("SELECT id,session_name,is_active,expires_at,created_at FROM attendance_session WHERE course_id=%s ORDER BY id DESC",(course_id,)); sessions=cursor.fetchall()
+            cursor.execute("SELECT student_id,name FROM students WHERE student_id NOT IN (SELECT student_id FROM course_enrollments WHERE course_id=%s) ORDER BY student_id",(course_id,)); available=cursor.fetchall()
+        return render_template("course_detail.html",course=course,enrolled=enrolled,sessions=sessions,available=available)
+
+    @app.post("/courses/<int:course_id>/enroll")
+    @admin_required
+    def course_enroll(course_id):
+        student_id=request.form.get("student_id","").strip().upper()
+        try:
+            with database_cursor() as (connection,cursor):
+                cursor.execute("INSERT INTO course_enrollments(course_id,student_id) VALUES(%s,%s)",(course_id,student_id)); _audit(cursor,"student.enrolled","course",course_id,{"student_id":student_id}); connection.commit()
+            flash("Student enrolled.","success")
+        except IntegrityError: flash("Student is already enrolled or does not exist.","danger")
+        return redirect(url_for("course_detail",course_id=course_id))
+
+    @app.post("/courses/<int:course_id>/unenroll/<student_id>")
+    @admin_required
+    def course_unenroll(course_id,student_id):
+        with database_cursor() as (connection,cursor): cursor.execute("DELETE FROM course_enrollments WHERE course_id=%s AND student_id=%s",(course_id,student_id)); _audit(cursor,"student.unenrolled","course",course_id,{"student_id":student_id}); connection.commit()
+        flash("Student removed from course.","success"); return redirect(url_for("course_detail",course_id=course_id))
 
     @app.route("/student_attendance/<int:session_id>", methods=["GET", "POST"])
     def student_attendance(session_id: int):
@@ -361,10 +529,11 @@ def register_routes(app: Flask) -> None:
                 student_exists = cursor.fetchone() is not None
                 cursor.execute(
                     """
-                    SELECT 1 FROM attendance_session
-                    WHERE id=%s AND pin=%s AND is_active=TRUE AND expires_at > NOW()
+                    SELECT 1 FROM attendance_session ats
+                    JOIN course_enrollments e ON e.course_id=ats.course_id AND e.student_id=%s
+                    WHERE ats.id=%s AND ats.pin=%s AND ats.is_active=TRUE AND ats.expires_at > NOW()
                     """,
-                    (session_id, pin),
+                    (student_id, session_id, pin),
                 )
                 valid_pin = cursor.fetchone() is not None
             if student_exists and valid_pin:
@@ -439,6 +608,7 @@ def register_routes(app: Flask) -> None:
                 (student_id, session_id),
             )
             already_marked = cursor.rowcount == 0
+            _audit(cursor, "attendance.duplicate" if already_marked else "attendance.recorded", "attendance_session", session_id, {"student_id": student_id})
             connection.commit()
         session.pop("attendance_student_id", None)
         session.pop("attendance_session_id", None)

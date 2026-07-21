@@ -1,20 +1,6 @@
-{% extends "base.html" %}
-{% block title %}Overview · {{ config.INSTITUTION_NAME }}{% endblock %}
-{% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-4">
-  <div><p class="page-eyebrow mb-2">{{ config.INSTITUTION_NAME }}</p><h1 class="page-title mb-1">Attendance overview</h1><p class="text-muted mb-0">Monitor student participation and manage secure check-in sessions.</p></div>
-  <a class="btn btn-outline-primary" href="{{ url_for('register') }}">Add student</a>
-</div>
-<div class="row g-3 mb-4">
-  {% for label, value, icon in [('Registered students', total_students, 'ST'), ('Attendance records', total_attendance, 'AR'), ('Present today', present_today, 'PT')] %}
-  <div class="col-md-4"><div class="panel metric d-flex justify-content-between"><div><div class="metric-label">{{ label }}</div><div class="metric-value">{{ value }}</div></div><div class="metric-icon">{{ icon }}</div></div></div>
-  {% endfor %}
-</div>
-<div class="row g-4">
-  <div class="col-lg-7"><section class="panel p-4 h-100"><p class="page-eyebrow mb-2">Quick actions</p><h2 class="h4">Manage attendance</h2><p class="text-muted mb-4">Review records, locate a student, or inspect attendance performance.</p><div class="d-flex flex-wrap gap-2"><a class="btn btn-primary" href="{{ url_for('attendance') }}">View records</a><a class="btn btn-outline-secondary" href="{{ url_for('search_attendance') }}">Search</a><a class="btn btn-outline-secondary" href="{{ url_for('attendance_percentage') }}">Percentages</a><a class="btn btn-outline-secondary" href="{{ url_for('analytics') }}">Analytics</a></div></section></div>
-  <div class="col-lg-5"><section class="panel p-4 text-center h-100"><p class="page-eyebrow mb-2">Live check-in</p><h2 class="h4">Attendance session</h2>
-    {% if active_session and qr_exists %}<img class="img-fluid rounded-3 my-3" width="190" src="{{ url_for('static', filename='qr/current_qr.png') }}?v={{ active_session[0] }}" alt="Current attendance QR code"><p class="mb-1">PIN <strong class="font-monospace fs-4">{{ active_session[1] }}</strong></p><p class="text-muted small">Expires {{ active_session[2].strftime('%H:%M') }}</p>{% else %}<div class="empty-state py-4">No attendance session is currently active.</div>{% endif %}
-    <form action="{{ url_for('generate_pin') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-primary w-100" type="submit">{{ 'Replace active session' if active_session else 'Start attendance session' }}</button></form>
-  </section></div>
-</div>
+{% extends "base.html" %}{% block title %}Overview · {{ config.INSTITUTION_NAME }}{% endblock %}{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-3 mb-4"><div><p class="page-eyebrow mb-2">{{ config.INSTITUTION_NAME }}</p><h1 class="page-title mb-1">Academic attendance overview</h1><p class="text-muted mb-0">Course-based, secure face-verified attendance.</p></div>{% if session.role=='admin' %}<a class="btn btn-outline-primary" href="{{ url_for('register') }}">Add student</a>{% endif %}</div>
+<div class="row g-3 mb-4">{% for label,value,icon in [('Registered students',total_students,'ST'),('Attendance records',total_attendance,'AR'),('Present today',present_today,'PT')] %}<div class="col-md-4"><div class="panel metric d-flex justify-content-between"><div><div class="metric-label">{{ label }}</div><div class="metric-value">{{ value }}</div></div><div class="metric-icon">{{ icon }}</div></div></div>{% endfor %}</div>
+<div class="row g-4"><div class="col-lg-5"><section class="panel p-4 h-100"><p class="page-eyebrow">Start check-in</p><h2 class="h4">New course session</h2><p class="text-muted">A secure five-minute QR and PIN will be created.</p><form method="post" action="{{ url_for('generate_pin') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label class="form-label">Course</label><select class="form-select mb-3" name="course_id" required><option value="">Select course</option>{% for c in courses %}<option value="{{ c[0] }}">{{ c[1] }} — {{ c[2] }}</option>{% endfor %}</select><button class="btn btn-primary w-100">Start attendance session</button></form></section></div>
+<div class="col-lg-7"><section class="panel p-4 h-100"><p class="page-eyebrow">Live sessions</p>{% for s in active_sessions %}<div class="d-flex flex-wrap align-items-center gap-3 border-bottom py-3"><img width="112" class="rounded" src="{{ url_for('static',filename='qr/session_' ~ s[0] ~ '.png') }}" alt="Attendance QR"><div><strong>{{ s[3] }} — {{ s[4] }}</strong><div>PIN <span class="font-monospace fs-4">{{ s[1] }}</span></div><small class="text-muted">Expires {{ s[2].strftime('%H:%M') }}</small></div></div>{% else %}<div class="empty-state">No active attendance sessions.</div>{% endfor %}</section></div></div>
 {% endblock %}

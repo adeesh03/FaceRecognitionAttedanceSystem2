@@ -1,7 +1,8 @@
 # JAIN University — Smart Attendance Portal
 
-A professional Flask and MySQL attendance application branded for JAIN University, with time-limited QR sessions, PIN
-validation, browser camera capture, and face-to-student identity matching.
+A professional Flask and MySQL attendance application branded for JAIN University. It includes administrator and
+lecturer roles, courses, enrolments, time-limited QR sessions, PIN validation, browser camera capture, face-to-student
+identity matching, per-subject percentages, CSV reports, and audit logs.
 
 ## Requirements
 
@@ -38,11 +39,12 @@ mobile browsers normally deny camera access outside a secure HTTPS context.
 
 ## Upgrade an existing database
 
-Back up the database, then apply the session-attendance migration once:
+Back up the database, then apply each outstanding migration once, in order:
 
 ```bash
 mysqldump -u root -p attendance_system > attendance_system.backup.sql
 mysql -u root -p attendance_system < migrations/001_session_based_attendance.sql
+mysql -u root -p attendance_system < migrations/002_academic_modules.sql
 ```
 
 Historical attendance records retain a `NULL` session because their original
@@ -60,10 +62,13 @@ HTTPS reverse proxy. Do not expose Flask's development server publicly.
 
 ## Attendance calculation
 
-Attendance percentage is calculated as:
+Create lecturer accounts and courses in the administrator portal, assign each course to a lecturer, and enrol its
+students before starting attendance. A lecturer can only access courses assigned to that account.
+
+Attendance percentage is calculated separately for every enrolled student and subject:
 
 ```text
-completed sessions attended / total completed sessions * 100
+completed subject sessions attended / total completed subject sessions * 100
 ```
 
 A session is completed after it expires or when it is replaced by a newer

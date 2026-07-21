@@ -16,7 +16,7 @@ __pycache__/
 uploads/
 
 # Generated QR
-static/qr/current_qr.png
+static/qr/*.png
 
 # Generated reports
 attendance_report.pdf
