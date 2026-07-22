@@ -7,6 +7,7 @@ import csv
 import json
 import os
 import pickle
+import re
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -34,10 +35,12 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from database import get_connection
+from modules.face_store import FacePhotoError, prepare_photos, rebuild_student_model, store_photos
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 ENCODINGS_FILE = BASE_DIR / "encodings" / "encodings.pkl"
+DATASET_DIR = BASE_DIR / "dataset"
 QR_DIR = BASE_DIR / "static" / "qr"
 
 
@@ -45,7 +48,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32),
-        MAX_CONTENT_LENGTH=5 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=25 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
@@ -232,8 +235,17 @@ def register_routes(app: Flask) -> None:
             name = request.form.get("name", "").strip()
             department = request.form.get("department", "").strip()
             email = request.form.get("email", "").strip().lower()
+            photos = request.files.getlist("face_photos")
             if not all((student_id, name, department, email)):
                 flash("All fields are required.", "danger")
+                return render_template("register.html"), 400
+            if not re.fullmatch(r"[A-Z0-9_-]{2,40}", student_id):
+                flash("Student ID may contain only letters, numbers, hyphens, and underscores.", "danger")
+                return render_template("register.html"), 400
+            try:
+                prepared_photos = prepare_photos(photos)
+            except FacePhotoError as error:
+                flash(str(error), "danger")
                 return render_template("register.html"), 400
             try:
                 with database_cursor() as (connection, cursor):
@@ -249,7 +261,14 @@ def register_routes(app: Flask) -> None:
             except IntegrityError:
                 flash("That student ID or email is already registered.", "danger")
                 return render_template("register.html"), 409
-            flash(f"Student {student_id} was registered successfully.", "success")
+            try:
+                store_photos(DATASET_DIR, student_id, prepared_photos)
+                encoded = rebuild_student_model(DATASET_DIR, ENCODINGS_FILE, student_id)
+            except (FacePhotoError, OSError, pickle.UnpicklingError) as error:
+                app.logger.exception("Face enrolment failed for %s", student_id)
+                flash(f"Student was registered, but face enrolment failed: {error}", "warning")
+                return redirect(url_for("student_faces", student_id=student_id))
+            flash(f"Student {student_id} was registered with {encoded} face encodings.", "success")
             return redirect(url_for("students"))
         return render_template("register.html")
 
@@ -262,6 +281,31 @@ def register_routes(app: Flask) -> None:
             )
             rows = cursor.fetchall()
         return render_template("students.html", students=rows)
+
+    @app.route("/students/<student_id>/faces", methods=["GET", "POST"])
+    @admin_required
+    def student_faces(student_id):
+        student_id = student_id.strip().upper()
+        with database_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT student_id,name,department FROM students WHERE student_id=%s", (student_id,))
+            student = cursor.fetchone()
+        if not student:
+            abort(404, description="Student was not found.")
+        folder = DATASET_DIR / student_id
+        photo_count = sum(1 for path in folder.glob("*") if path.suffix.lower() in {".jpg", ".jpeg", ".png"}) if folder.exists() else 0
+        if request.method == "POST":
+            try:
+                prepared = prepare_photos(request.files.getlist("face_photos"))
+                added = store_photos(DATASET_DIR, student_id, prepared)
+                encoded = rebuild_student_model(DATASET_DIR, ENCODINGS_FILE, student_id)
+                with database_cursor() as (connection, cursor):
+                    _audit(cursor, "face_photos.added", "student", student_id, {"added": added, "total_encodings": encoded})
+                    connection.commit()
+                flash(f"Added {added} photos. The model now has {encoded} encodings for {student_id}.", "success")
+                return redirect(url_for("student_faces", student_id=student_id))
+            except (FacePhotoError, OSError, pickle.UnpicklingError) as error:
+                flash(str(error), "danger")
+        return render_template("student_faces.html", student=student, photo_count=photo_count)
 
     @app.get("/attendance")
     @staff_required
@@ -567,7 +611,12 @@ def register_routes(app: Flask) -> None:
             image = face_recognition.load_image_file(BytesIO(image_bytes))
         except (ValueError, TypeError, OSError):
             return jsonify(ok=False, message="The submitted image could not be read."), 400
-        encodings = face_recognition.face_encodings(image)
+        face_locations = face_recognition.face_locations(
+            image, number_of_times_to_upsample=2, model="hog"
+        )
+        encodings = face_recognition.face_encodings(
+            image, known_face_locations=face_locations
+        )
         if len(encodings) != 1:
             message = "No face was detected." if not encodings else "Only one face may be visible."
             return jsonify(ok=False, message=message), 400
